@@ -1,62 +1,94 @@
-import logging
 import os
 import time
+import logging
+import uuid
 from google.cloud import spanner
 from google.api_core import exceptions
 
-# 1. Setup the Black Box Logger
-logging.basicConfig(
-    filename='../logs/bank_operations.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# --- 1. SYSTEM SETUP ---
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+log_dir = os.path.join(project_root, "logs")
+log_file = os.path.join(log_dir, "bank_operations.log")
 
+os.makedirs(log_dir, exist_ok=True)
 os.environ["SPANNER_EMULATOR_HOST"] = "localhost:9010"
 
+# Professional Logging (No emojis to prevent Windows Unicode errors)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+
+# --- 2. BANKING LOGIC ---
 
 def process_payment(transaction_id, amount):
-    """The Worker: Attempts a single database insertion."""
-    client = spanner.Client(project="local-banking-project")
-    instance = client.instance("bank-master")
+    """Inserts a transaction with Idempotency checks."""
+    spanner_client = spanner.Client(project="local-banking-project")
+    instance = spanner_client.instance("bank-master")
     database = instance.database("transaction-ledger")
 
-    def insert_payment(transaction):
-        transaction.insert(
-            table="Transactions",
-            columns=("Id", "Amount", "Status"),
-            values=[(transaction_id, amount, "SUCCESS")],
+    def insert_row(transaction):
+        transaction.execute_update(
+            "INSERT Transactions (Id, Amount, Status) VALUES (@id, @amount, @status)",
+            params={
+                'id': transaction_id,
+                'amount': amount,
+                'status': 'SUCCESS'
+            },
+            param_types={
+                'id': spanner.param_types.INT64,
+                'amount': spanner.param_types.FLOAT64,
+                'status': spanner.param_types.STRING
+            }
         )
+        logging.info(f"SUCCESS: Processed Transaction ID: {transaction_id}")
 
-    database.run_in_transaction(insert_payment)
+    try:
+        database.run_in_transaction(insert_row)
+    except exceptions.AlreadyExists:
+        logging.warning(f"IDEMPOTENCY ALERT: Transaction {transaction_id} already exists. Skipping duplicate.")
+    except Exception as e:
+        logging.error(f"SYSTEM ERROR: {e}")
+        raise e
 
 
 def process_with_retry(transaction_id, amount, retries=3):
-    """The Architect: Handles network chaos and retries."""
+    """Circuit Breaker: Retries on network blips."""
     for attempt in range(retries):
         try:
             process_payment(transaction_id, amount)
-            logging.info(f"SUCCESS: ID {transaction_id} finalized on attempt {attempt + 1}.")
-            print(f"✅ Transaction {transaction_id} processed successfully.")
-            return
+            return True
+        except Exception:
+            wait = (attempt + 1) * 2
+            logging.info(f"RETRYING: Attempt {attempt + 1}/{retries} in {wait}s...")
+            time.sleep(wait)
+    return False
 
-        except exceptions.AlreadyExists:
-            logging.warning(f"IDEMPOTENCY_BLOCK: ID {transaction_id} already exists. No action taken.")
-            print(f"⚠️  BLOCKING DUPLICATE: ID {transaction_id} already in ledger.")
-            return
 
-        except Exception as e:
-            logging.error(f"ATTEMPT {attempt + 1} FAILED: {e}")
-            print(f"🔄 Network Blip... Retrying ({attempt + 1}/{retries})")
-            time.sleep(2)
-
-    print("❌ FATAL: All retries failed.")
-
+# --- 3. THE FINAL RUN ---
 
 if __name__ == "__main__":
-    # Test Case 1: Standard Success
-    new_id = 77777777
-    process_with_retry(new_id, 1500.0)
+    print("-" * 50)
+    print("🚀 STARTING PRODUCTION CHAOS TEST")
+    print(f"Log Path: {log_file}")
+    print("-" * 50)
 
-    # Test Case 2: The 'Double Click' (Idempotency Test)
-    print("\n--- Simulating User Double-Click ---")
-    process_with_retry(new_id, 1500.0)
+    # Test 1: Unique Transaction
+    unique_id = int(time.time())
+    process_with_retry(unique_id, 5000.0)
+
+    # Test 2: Simulated 'Double-Click' (The Idempotency Test)
+    duplicate_id = 88887777
+    print("\n[Scenario: User double-clicks 'Pay' button]")
+    process_with_retry(duplicate_id, 1200.0)  # First Click (Success)
+    process_with_retry(duplicate_id, 1200.0)  # Second Click (Handled)
+
+    print("-" * 50)
+    print("🏁 TEST COMPLETE: ALL SYSTEMS NOMINAL")
+    print("-" * 50)

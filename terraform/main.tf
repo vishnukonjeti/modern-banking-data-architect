@@ -26,6 +26,8 @@ resource "google_spanner_database" "ledger" {
   instance = google_spanner_instance.bank_instance.name
   name     = "transaction-ledger"
 
+  deletion_protection = false
+
   ddl = [
     "CREATE TABLE Transactions (Id INT64 NOT NULL, Amount FLOAT64, Status STRING(MAX)) PRIMARY KEY(Id)"
   ]
