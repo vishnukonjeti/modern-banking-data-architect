@@ -6,7 +6,7 @@ from google.api_core import exceptions
 
 # 1. Setup the Black Box Logger
 logging.basicConfig(
-    filename='bank_operations.log',
+    filename='../logs/bank_operations.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
