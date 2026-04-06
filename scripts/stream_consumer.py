@@ -49,8 +49,22 @@ def process_stream():
         while True:
             msg = consumer.poll(1.0)
             if msg is None: continue
+            if msg.error():
+                print(f"Consumer error: {msg.error()}")
+                continue
 
-            data = json.loads(msg.value().decode('utf-8'))
+            # --- THE SAFETY NET ---
+            raw_payload = msg.value()
+            if not raw_payload:
+                print("⚠️ Skipping empty message.")
+                continue
+
+            try:
+                data = json.loads(raw_payload.decode('utf-8'))
+            except json.JSONDecodeError:
+                print(f"❌ Failed to decode JSON: {raw_payload}")
+                continue
+            # -----------------------
 
             # Use Phase 1 Brain to Validate
             validation_status = LedgerEngine.process_transaction(
