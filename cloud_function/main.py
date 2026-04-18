@@ -1,41 +1,55 @@
 import base64
 import json
+import functions_framework
 from google.cloud import spanner
 
-# Pre-initialize the client outside the function for speed
+# 1. Initialize Spanner Client outside the function to reuse connections (Best Practice)
 spanner_client = spanner.Client()
 instance = spanner_client.instance('banking-instance')
 database = instance.database('banking-db')
 
-def process_pubsub_message(event, context=None):
-    try:
-        # 1. Extract the data from the Pub/Sub envelope
-        if isinstance(event, dict) and 'data' in event:
-            # The message comes in as a Base64 string
-            raw_data = base64.b64decode(event['data']).decode('utf-8')
-            data = json.loads(raw_data)
-        else:
-            print("Received event with no data")
-            return
 
-        # 2. Extract values with fallbacks
-        txn_id = data.get('transaction_id', 'UNKNOWN')
+@functions_framework.cloud_event
+def process_banking_transaction(cloud_event):
+    """
+    Triggered by a Pub/Sub message via Eventarc.
+    Decodes the data, checks for fraud, and saves to Spanner.
+    """
+    try:
+        # 2. Extract and Decode the Pub/Sub message
+        # In Gen 2 / CloudEvents, the data is inside cloud_event.data['message']['data']
+        encoded_data = cloud_event.data["message"]["data"]
+        raw_json = base64.b64decode(encoded_data).decode('utf-8')
+        data = json.loads(raw_json)
+
+        # 3. Parse fields
+        txn_id = data.get('transaction_id', 'N/A')
         user_id = data.get('user_id', 'UNKNOWN')
         amount = float(data.get('amount', 0))
 
-        print(f"💳 Processing: {txn_id} | Amount: {amount}")
+        print(f"📥 Received Transaction: {txn_id} for User: {user_id}")
 
-        # 3. Write to Spanner
-        def insert_txn(transaction):
+        # 🚀 PHASE 4 LOGIC: Fraud Gatekeeper
+        # Reject any transaction over $500
+        if amount > 500:
+            print(f"🛑 REJECTED: Transaction {txn_id} exceeds $500 limit (Amount: ${amount})")
+            return "Fraud Blocked", 200
+
+        # 4. Spanner Write Operation
+        def insert_transaction(transaction):
             transaction.insert(
                 "Transactions",
                 columns=["TransactionID", "UserID", "Amount", "Timestamp"],
                 values=[(txn_id, user_id, amount, spanner.COMMIT_TIMESTAMP)]
             )
 
-        database.run_in_transaction(insert_txn)
-        print(f"✅ Success: {txn_id} saved to Spanner.")
+        # Execute the write within a transaction
+        database.run_in_transaction(insert_transaction)
+
+        print(f"✅ SUCCESS: {txn_id} saved to Spanner.")
+        return "OK", 200
 
     except Exception as e:
-        # This will now tell us EXACTLY what went wrong in the logs
-        print(f"🔥 Error details: {str(e)}")
+        print(f"🔥 Error processing transaction: {str(e)}")
+        # We return 200 to avoid Pub/Sub retrying a broken message indefinitely
+        return "Error handled", 200
